@@ -105,12 +105,29 @@ class FetchError(Exception):
 
 # --------------------------------------------------------------------- utils
 
+def strip_markup(text, keep_breaks=False):
+    """Remove tags, then unescape, then remove whatever that produced.
+
+    Order matters and is the whole point. Unescaping last would turn a title
+    holding "&lt;img src=x&gt;" into real markup on the way out, handing the UI
+    exactly what stripping was supposed to prevent. So: strip, unescape, strip
+    again, and drop any stray angle brackets that survive. The QML side sets
+    textFormat: Text.PlainText on every Text as well; neither layer is trusted
+    to be the only one doing this.
+    """
+    s = str(text or "")
+    for _ in range(2):
+        if keep_breaks:
+            s = re.sub(r"<br\s*/?>", "\n", s)
+            s = re.sub(r"</p\s*>", "\n\n", s)
+        s = re.sub(r"<[^>]*>", "", s)
+        s = html.unescape(s)
+    return s.replace("<", "").replace(">", "")
+
+
 def text_of(fragment):
-    """Strip tags and unescape entities, collapsing whitespace."""
-    s = re.sub(r"<br\s*/?>", "\n", fragment or "")
-    s = re.sub(r"</p>", "\n\n", s)
-    s = re.sub(r"<[^>]+>", "", s)
-    s = html.unescape(s)
+    """Prose from Goodreads: tags gone, entities resolved, whitespace tidied."""
+    s = strip_markup(fragment, keep_breaks=True)
     s = re.sub(r"[ \t]+", " ", s)
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
@@ -130,7 +147,7 @@ def tag(fragment, name):
     cd = re.search(r"<!\[CDATA\[(.*?)\]\]>", v, re.S)
     if cd:
         v = cd.group(1)
-    return re.sub(r"\s+", " ", html.unescape(v)).strip()
+    return re.sub(r"\s+", " ", strip_markup(v)).strip()
 
 
 def raw_tag(fragment, name):
@@ -142,7 +159,7 @@ def raw_tag(fragment, name):
     cd = re.search(r"<!\[CDATA\[(.*?)\]\]>", v, re.S)
     if cd:
         v = cd.group(1)
-    return html.unescape(v).strip()
+    return v
 
 
 def to_int(value, default=0):

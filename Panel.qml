@@ -17,6 +17,13 @@ import "Model.js" as Model
 // All network work happens in bin/goodreads-cli (see its docstring for why
 // Goodreads is read the way it is). This file only launches it, parses the
 // JSON it prints, and draws the result.
+//
+// Every Text here sets `textFormat: Text.PlainText`, without exception. Titles,
+// authors, blurbs, reviews, reviewer names and shelf labels are all strings
+// Goodreads controls, and Qt's default AutoText promotes anything that looks
+// like markup to rich text — which renders tags and fetches embedded resources
+// such as <img src>. Static labels carry it too, so that the rule is "every
+// Text", with no judgement call left for the next edit to get wrong.
 Panel {
   id: root
   // The bar overwrites this with the entry id from shell.json, so it is always
@@ -658,6 +665,7 @@ Panel {
       spacing: Style.spacing.xxs
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: bookRow.modelData.title
         color: root.fg
@@ -666,6 +674,7 @@ Panel {
         elide: Text.ElideRight
       }
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         visible: bookRow.modelData.author !== ""
         text: bookRow.modelData.author
@@ -675,6 +684,7 @@ Panel {
         elide: Text.ElideRight
       }
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         // Your own rating leads when you have one — that is the interesting
         // number on your own shelf — with the crowd's average following it.
@@ -758,6 +768,7 @@ Panel {
             height: Style.spacing.controlHeight
 
             Text {
+              textFormat: Text.PlainText
               id: backBtn
               visible: root.view !== "shelves"
               anchors.left: parent.left
@@ -771,6 +782,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               anchors.left: backBtn.visible ? backBtn.right : parent.left
               anchors.leftMargin: backBtn.visible ? Style.spacing.md : 0
               anchors.verticalCenter: parent.verticalCenter
@@ -783,6 +795,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               id: openBtn
               anchors.right: refreshBtn.left
               anchors.rightMargin: Style.spacing.md
@@ -797,6 +810,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               id: refreshBtn
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
@@ -816,6 +830,7 @@ Panel {
             spacing: Style.spacing.md
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: "Connect your Goodreads account to read your shelves here."
               color: root.fg
@@ -825,6 +840,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: !root.connecting
               text: "Goodreads shut its API down in 2020, so there is no sign-in to do — "
@@ -848,6 +864,7 @@ Panel {
 
             // ---- waiting for the copied link ----
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: root.connecting
               text: root.connectMessage
@@ -858,6 +875,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: root.connecting
               text: "Watching the clipboard… " + Math.ceil(root.connectTicksLeft * root.connectPollMs / 1000) + "s"
@@ -895,6 +913,7 @@ Panel {
             // The last thing Connect said, kept visible after it stops so a
             // timeout or a rejected link explains itself.
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: !root.connecting && root.connectMessage !== ""
               text: root.connectMessage
@@ -927,6 +946,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.configured && root.connectedName !== ""
             width: parent.width
             text: "Connected as " + root.connectedName
@@ -937,6 +957,7 @@ Panel {
 
           // ---- status / error ----
           Text {
+            textFormat: Text.PlainText
             visible: root.errorText !== ""
             width: parent.width
             text: root.errorText
@@ -947,6 +968,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.statusText !== "" && root.errorText === ""
             width: parent.width
             text: root.statusText
@@ -979,6 +1001,7 @@ Panel {
                 HoverHandler { id: shelfHover; cursorShape: Qt.PointingHandCursor }
 
                 Text {
+                  textFormat: Text.PlainText
                   id: shelfGlyph
                   anchors.left: parent.left
                   anchors.leftMargin: Style.spacing.sm
@@ -989,6 +1012,7 @@ Panel {
                   font.pixelSize: Style.font.bodySmall
                 }
                 Text {
+                  textFormat: Text.PlainText
                   anchors.left: shelfGlyph.right
                   anchors.leftMargin: Style.spacing.md
                   anchors.right: shelfCount.left
@@ -1001,6 +1025,7 @@ Panel {
                   elide: Text.ElideRight
                 }
                 Text {
+                  textFormat: Text.PlainText
                   id: shelfCount
                   anchors.right: parent.right
                   anchors.rightMargin: Style.spacing.sm
@@ -1014,6 +1039,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: root.filteredShelves.length === 0 && !root.busy && root.errorText === ""
               width: parent.width
               topPadding: Style.space(12)
@@ -1052,6 +1078,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: root.filtering && !root.shelfAllLoading && root.filteredBooks.length === 0
               width: parent.width
               topPadding: Style.space(6)
@@ -1084,6 +1111,7 @@ Panel {
                 onClicked: root.stepShelfPage(-1)
               }
               Text {
+                textFormat: Text.PlainText
                 anchors.centerIn: parent
                 text: "page " + root.shelfPage
                 color: root.dim
@@ -1105,6 +1133,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: !root.busy && !root.filtering && root.errorText === ""
                        && root.books.length === 0
               width: parent.width
@@ -1148,6 +1177,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: root.view === "search" && !root.busy && root.errorText === ""
                        && root.results.length === 0
               width: parent.width
@@ -1195,6 +1225,7 @@ Panel {
                 spacing: Style.spacing.xs
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   text: String(root.detail.title || "")
                   color: root.fg
@@ -1206,6 +1237,7 @@ Panel {
                   elide: Text.ElideRight
                 }
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   visible: String(root.detail.author || "") !== ""
                   text: String(root.detail.author || "")
@@ -1216,6 +1248,7 @@ Panel {
                   wrapMode: Text.WordWrap
                 }
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   visible: root.detail.averageRating > 0
                   text: Model.stars(Math.round(root.detail.averageRating)) + "   "
@@ -1226,6 +1259,7 @@ Panel {
                   elide: Text.ElideRight
                 }
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   visible: (root.detail.genres || []).length > 0
                   text: (root.detail.genres || []).join(" · ")
@@ -1237,6 +1271,7 @@ Panel {
                   elide: Text.ElideRight
                 }
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   visible: String(root.detail.publisher || "") !== ""
                            || String(root.detail.format || "") !== ""
@@ -1252,6 +1287,7 @@ Panel {
 
             // ---- description, folded to four lines until clicked ----
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: String(root.detail.description || "") !== ""
               text: String(root.detail.description || "")
@@ -1268,6 +1304,7 @@ Panel {
             // The fallback path can only reach the reviews widget, so say why
             // the metadata above is thinner than usual instead of looking broken.
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: root.detailPartial
               text: "Goodreads is throttling the full book page; showing the reviews widget instead."
@@ -1303,6 +1340,7 @@ Panel {
                   height: who.implicitHeight
 
                   Text {
+                    textFormat: Text.PlainText
                     id: who
                     anchors.left: parent.left
                     text: Model.oneLine(reviewRow.modelData.reviewer, 28)
@@ -1312,6 +1350,7 @@ Panel {
                     font.bold: true
                   }
                   Text {
+                    textFormat: Text.PlainText
                     anchors.left: who.right
                     anchors.leftMargin: Style.spacing.md
                     anchors.right: parent.right
@@ -1330,6 +1369,7 @@ Panel {
                 // Reviews run long; six lines is enough to judge one, and the
                 // row opens the full review on Goodreads when tapped.
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   text: reviewRow.modelData.spoiler
                         ? "(marked as a spoiler — open on Goodreads to read it)"
@@ -1350,6 +1390,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: !root.busy && root.reviews.length === 0 && root.errorText === ""
               width: parent.width
               topPadding: Style.space(12)
