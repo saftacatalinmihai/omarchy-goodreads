@@ -33,7 +33,9 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property int pad: Style.spacing.popupPadding
 
-  readonly property string glyph: "\uf02d"  // nf-fa-book
+  // An open book rather than fa-book: at bar sizes the closed-book glyph
+  // collapses into an indistinct block, while this one still reads as a book.
+  readonly property string glyph: "\uf405"  // nf-oct-book
 
   // ---- config ----
   // Connect writes the id into shell.json through `omarchy bar set`, but the
@@ -102,7 +104,10 @@ Panel {
   readonly property int connectPollMs: 700
   readonly property int connectTimeoutSec: 300
 
-  readonly property string pillText: glyph + (barCount >= 0 ? "  " + barCount : "")
+  // No separator at all. The bar font is monospaced, so the glyph already sits
+  // in a full cell with its own slack; adding a space on top of that reads as a
+  // stray number parked next to an unrelated icon rather than as one pill.
+  readonly property string pillText: glyph + (barCount >= 0 ? String(barCount) : "")
   readonly property bool busy: shelvesProc.running || shelfProc.running
                                || searchProc.running || bookProc.running
 

@@ -167,7 +167,7 @@ function prettyShelf(name) {
 function shelfIcon(name) {
   switch (String(name)) {
   case "read": return "\uf00c"              // nf-fa-check
-  case "currently-reading": return "\uf02d" // nf-fa-book
+  case "currently-reading": return "\uf405" // nf-oct-book
   case "to-read": return "\uf097"           // nf-fa-bookmark_o
   case "did-not-finish": return "\uf05e"    // nf-fa-ban
   default: return "\uf02e"                  // nf-fa-bookmark
