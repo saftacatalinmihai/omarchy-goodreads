@@ -11,7 +11,8 @@ shelves, book search, and community reviews one click away.
   `to-read`, and any custom ones — with its book count.
 - **A shelf's books.** Cover, title, author, your own star rating, the
   community average, page count and year. Paged, newest first.
-- **Book search.** Type in the panel's search box and press Enter.
+- **Book search.** Type in the panel's search box — results arrive as you type,
+  from three letters on. Enter skips the wait.
 - **Book details and reviews.** Blurb, genres, edition details, rating
   breakdown, and the top community reviews with their stars, dates, and likes.
 - **The bar pill** shows how many books are on the shelf you pick (default:

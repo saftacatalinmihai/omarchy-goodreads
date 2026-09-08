@@ -73,6 +73,15 @@ Panel {
   property string query: ""
   property var results: []
 
+  // Live search. Typing searches on its own once there is enough of a query to
+  // be worth a request; Enter just skips the wait. The minimum keeps one- and
+  // two-letter prefixes — which match half of Goodreads — from costing a fetch,
+  // and the debounce collapses a burst of keystrokes into a single one.
+  readonly property int searchMinChars: 3
+  readonly property int searchDebounceMs: 350
+  property string pendingQuery: ""
+  property string lastSearched: ""
+
   // The row the book view was opened from, so a details fetch that only
   // returned reviews still has a title and cover to show.
   property var pendingBook: null
@@ -178,14 +187,43 @@ Panel {
   function runSearch(text, fresh) {
     var q = String(text || "").trim()
     if (q === "") return
+    searchDebounce.stop()
     root.query = q
+    root.lastSearched = q
+    // Back should return to whatever the search interrupted, not always the
+    // shelf list — typing while reading a shelf and then going back should put
+    // that shelf on screen again.
+    if (root.view !== "search") root.backView = root.view
     root.view = "search"
-    root.backView = "shelves"
     root.results = []
     searchProc.running = false
     searchProc.command = root.cli(["search", "--query", q, "--limit", "20"], fresh === true)
     searchProc.running = true
     root.statusText = "searching…"
+  }
+
+  // Called on every keystroke. Nothing here talks to the network directly; it
+  // only decides whether a search is worth scheduling.
+  function scheduleSearch(text) {
+    var q = String(text || "").trim()
+    root.pendingQuery = q
+    searchDebounce.stop()
+    if (q === "") {
+      // Emptying the field is an unambiguous "take me back".
+      root.lastSearched = ""
+      if (root.view === "search") root.goBack()
+      return
+    }
+    if (q.length < root.searchMinChars) return
+    if (q === root.lastSearched) return
+    searchDebounce.restart()
+  }
+
+  // Enter: same search, without waiting out the debounce.
+  function searchNow(text) {
+    var q = String(text || "").trim()
+    if (q.length < root.searchMinChars) return
+    root.runSearch(q, false)
   }
 
   function openBook(book, fresh) {
@@ -412,6 +450,12 @@ Panel {
     onExited: function(code) {
       if (code !== 0) root.errorText = "Connected, but saving the id to the bar config failed."
     }
+  }
+
+  Timer {
+    id: searchDebounce
+    interval: root.searchDebounceMs
+    onTriggered: root.runSearch(root.pendingQuery, false)
   }
 
   Timer {
@@ -688,13 +732,14 @@ Panel {
             id: searchField
             visible: root.configured
             width: parent.width
-            placeholderText: "Search Goodreads — Enter"
+            placeholderText: "Search Goodreads"
             foreground: root.fg
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
+            onTextChanged: root.scheduleSearch(searchField.text)
             Keys.onPressed: function(event) {
               if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                root.runSearch(searchField.text)
+                root.searchNow(searchField.text)
                 event.accepted = true
               } else if (event.key === Qt.Key_Escape) {
                 root.close()
@@ -932,7 +977,7 @@ Panel {
               topPadding: Style.space(12)
               text: root.view === "shelf"
                     ? "Nothing on this shelf" + (root.shelfPage > 1 ? " page." : ".")
-                    : (root.query === "" ? "Type a title or author above." : "No results for “" + root.query + "”.")
+                    : (root.query === "" ? "Type at least " + root.searchMinChars + " letters above." : "No results for “" + root.query + "”.")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall

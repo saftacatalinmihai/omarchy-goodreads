@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "safta.goodreads",
   "name": "Goodreads",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "Safta Catalin Mihai",
   "license": "MIT",
   "description": "Browse your Goodreads shelves, search for books, and read community reviews from the Omarchy bar.",
