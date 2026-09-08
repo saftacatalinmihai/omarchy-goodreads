@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "id": "safta.goodreads",
+  "name": "Goodreads",
+  "version": "1.0.0",
+  "author": "Safta Catalin Mihai",
+  "license": "MIT",
+  "description": "Browse your Goodreads shelves, search for books, and read community reviews from the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Goodreads",
+    "description": "Your shelves (read, currently-reading, to-read, …) in the bar, plus book search and community reviews.",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "userId": "",
+      "rssKey": "",
+      "defaultShelf": "currently-reading",
+      "perPage": 30,
+      "reviewCount": 10,
+      "refreshSec": 900,
+      "showCovers": "On"
+    },
+    "schema": [
+      {
+        "key": "userId",
+        "type": "string",
+        "label": "Goodreads user ID",
+        "defaultValue": "",
+        "description": "The number in your profile URL: goodreads.com/user/show/<ID>-your-name. Required."
+      },
+      {
+        "key": "rssKey",
+        "type": "string",
+        "label": "RSS key (optional)",
+        "defaultValue": "",
+        "description": "Only needed if your profile is private. Find it in the RSS link at the bottom of one of your shelf pages (the key= parameter)."
+      },
+      {
+        "key": "defaultShelf",
+        "type": "string",
+        "label": "Shelf shown in the bar",
+        "defaultValue": "currently-reading",
+        "description": "The shelf whose count the bar pill shows and that the panel opens on."
+      },
+      {
+        "key": "perPage",
+        "type": "integer",
+        "label": "Books per shelf page",
+        "min": 5,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 30
+      },
+      {
+        "key": "reviewCount",
+        "type": "integer",
+        "label": "Reviews per book",
+        "min": 3,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 10
+      },
+      {
+        "key": "refreshSec",
+        "type": "integer",
+        "label": "Shelf refresh (seconds)",
+        "min": 120,
+        "max": 7200,
+        "step": 60,
+        "defaultValue": 900,
+        "description": "How often the bar count is refreshed. Goodreads rate-limits scrapers, so keep this generous."
+      },
+      {
+        "key": "showCovers",
+        "type": "enum",
+        "label": "Show cover art",
+        "options": [
+          "On",
+          "Off"
+        ],
+        "defaultValue": "On",
+        "description": "Covers are fetched from Goodreads' image CDN. Turn off for a text-only panel."
+      }
+    ]
+  }
+}

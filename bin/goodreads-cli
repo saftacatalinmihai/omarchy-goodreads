@@ -1,0 +1,601 @@
+#!/usr/bin/env python3
+"""Goodreads reader for the Omarchy shell plugin.
+
+The official Goodreads API was retired in December 2020 and no new keys are
+issued, so this talks to the site the way a browser does:
+
+  whoami   -> /user/show/<id>            (confirms an id copied from the browser)
+  shelves  -> /user/show/<id>            (public profile: shelf names + counts)
+  shelf    -> /review/list_rss/<id>      (per-shelf RSS feed, rich per-book data)
+  search   -> /book/auto_complete        (JSON; /search is behind a bot check)
+  book     -> /book/show/<id>            (Next.js page, Apollo cache in a script),
+              falling back to /api/reviews_widget_iframe when that is gated
+
+Everything is read-only and stdlib-only, so the plugin ships without
+dependencies. Output is always a single JSON object on stdout; failures also
+produce JSON ({"error": "..."}) and a non-zero exit, so the QML side can show
+the message instead of guessing from an empty body.
+"""
+
+import argparse
+import hashlib
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.parse
+
+BASE = "https://www.goodreads.com"
+UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+TIMEOUT = 25
+
+
+# --------------------------------------------------------------------- cache
+
+def cache_dir():
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    path = os.path.join(base, "omarchy-goodreads")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def cache_get(key, ttl):
+    if ttl <= 0:
+        return None
+    path = os.path.join(cache_dir(), hashlib.sha1(key.encode()).hexdigest() + ".json")
+    try:
+        if time.time() - os.path.getmtime(path) > ttl:
+            return None
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def cache_put(key, value):
+    path = os.path.join(cache_dir(), hashlib.sha1(key.encode()).hexdigest() + ".json")
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(value, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------- http
+
+def fetch(url):
+    """GET a page as a browser would.
+
+    urllib gets served an AWS WAF challenge on /search and /book/show — the
+    block is TLS/header fingerprinting, not rate limiting — while curl sails
+    through, so shell out rather than fight it. curl is already a hard
+    dependency of the Omarchy shell, and every argument goes through argv, so
+    nothing here is shell-quoted.
+    """
+    proc = subprocess.run(
+        ["curl", "-sSL", "--compressed", "--max-time", str(TIMEOUT),
+         "-A", UA,
+         "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+         "-H", "Accept-Language: en-US,en;q=0.9",
+         "-w", "\n%{http_code}", url],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise FetchError("could not reach goodreads.com (curl exit %d%s)"
+                         % (proc.returncode,
+                            ": " + proc.stderr.strip() if proc.stderr.strip() else ""))
+    body, _, status = proc.stdout.rpartition("\n")
+    if status.strip() != "200":
+        raise FetchError("Goodreads answered %s for that request" % status.strip())
+    if "awsWafCookieDomainList" in body[:2000]:
+        raise FetchError("Goodreads served a bot check; try again in a minute")
+    return body
+
+
+class FetchError(Exception):
+    """A request that failed in a way worth showing the user verbatim."""
+
+
+# --------------------------------------------------------------------- utils
+
+def text_of(fragment):
+    """Strip tags and unescape entities, collapsing whitespace."""
+    s = re.sub(r"<br\s*/?>", "\n", fragment or "")
+    s = re.sub(r"</p>", "\n\n", s)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = html.unescape(s)
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+def tag(fragment, name):
+    """One RSS field, unescaped and whitespace-collapsed.
+
+    The feed pads several fields with runs of spaces and newlines — author_name
+    in particular arrives as "Steve            Hawk" — so squeezing whitespace
+    here keeps every consumer from having to.
+    """
+    m = re.search(r"<%s>(.*?)</%s>" % (name, name), fragment, re.S)
+    if not m:
+        return ""
+    v = m.group(1)
+    cd = re.search(r"<!\[CDATA\[(.*?)\]\]>", v, re.S)
+    if cd:
+        v = cd.group(1)
+    return re.sub(r"\s+", " ", html.unescape(v)).strip()
+
+
+def raw_tag(fragment, name):
+    """Like tag(), but keeps line breaks — for the prose fields."""
+    m = re.search(r"<%s>(.*?)</%s>" % (name, name), fragment, re.S)
+    if not m:
+        return ""
+    v = m.group(1)
+    cd = re.search(r"<!\[CDATA\[(.*?)\]\]>", v, re.S)
+    if cd:
+        v = cd.group(1)
+    return html.unescape(v).strip()
+
+
+def to_int(value, default=0):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def to_float(value, default=0.0):
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def bigger_cover(url):
+    """RSS hands out 50px thumbnails; ask for a size that survives a panel."""
+    return re.sub(r"\._[A-Z0-9,_]+_\.jpg", "._SY180_.jpg", url or "")
+
+
+# ------------------------------------------------------------------- shelves
+
+def cmd_shelves(args):
+    url = "%s/user/show/%s" % (BASE, urllib.parse.quote(str(args.user)))
+    page = fetch(url)
+    shelves = []
+    seen = set()
+    pattern = re.compile(
+        r'userShowPageShelfListItem"\s+href="[^"]*?shelf=([^"&]+)"\s*>\s*(.*?)\s*</a>',
+        re.S,
+    )
+    for slug, label in pattern.findall(page):
+        slug = html.unescape(slug)
+        if slug in seen:
+            continue
+        seen.add(slug)
+        count = re.search(r"\((\d+)\)", label)
+        shelves.append({
+            "name": slug,
+            "label": text_of(label).split("\n")[0].replace("‎", "").strip(),
+            "count": to_int(count.group(1)) if count else 0,
+        })
+    if not shelves:
+        # A profile set to "private" renders no shelf list. The three built-in
+        # shelves still have working RSS feeds for the owner's own key, so
+        # offer them rather than showing an empty panel.
+        shelves = [
+            {"name": s, "label": s, "count": -1}
+            for s in ("currently-reading", "read", "to-read")
+        ]
+    name = re.search(r"<title>\s*(.*?)\s*</title>", page, re.S)
+    return {
+        "user": str(args.user),
+        "name": text_of(name.group(1)) if name else "",
+        "profileUrl": url,
+        "shelves": shelves,
+    }
+
+
+# -------------------------------------------------------------------- whoami
+
+# A Goodreads profile, shelf, or RSS URL all carry the numeric user id. Book and
+# review URLs do not, which is why the id is looked for in these shapes only —
+# a random goodreads.com link in the clipboard must not read as a sign-in.
+USER_ID_PATTERNS = [
+    re.compile(r"goodreads\.com/user/show/(\d+)"),
+    re.compile(r"goodreads\.com/review/list/(\d+)"),
+    re.compile(r"goodreads\.com/review/list_rss/(\d+)"),
+]
+
+
+def user_id_in(text):
+    """The user id inside a Goodreads URL, or "" when there is none."""
+    s = str(text or "")
+    for pattern in USER_ID_PATTERNS:
+        m = pattern.search(s)
+        if m:
+            return m.group(1)
+    # A bare id pasted on its own is unambiguous enough to accept.
+    s = s.strip()
+    if re.fullmatch(r"\d{2,12}", s):
+        return s
+    return ""
+
+
+def cmd_whoami(args):
+    """Resolve a copied Goodreads URL into an id and a confirmed display name.
+
+    This backs the panel's Connect flow: the URL comes off the clipboard, and
+    the profile fetch is what proves the id is real before it is written into
+    the bar's config.
+    """
+    user_id = user_id_in(args.url)
+    if not user_id:
+        return {"connected": False,
+                "reason": "that link has no Goodreads user id in it"}
+
+    profile = cmd_shelves(argparse.Namespace(user=user_id))
+    # "Safta Mihai - Bucharest, 10, Romania (302 books)" -> "Safta Mihai"
+    name = re.split(r"\s+-\s+|\s*\(", profile.get("name") or "")[0].strip()
+    return {
+        "connected": True,
+        "userId": user_id,
+        "name": name,
+        "profileUrl": profile.get("profileUrl") or "",
+        "shelves": profile.get("shelves") or [],
+    }
+
+
+# --------------------------------------------------------------------- shelf
+
+def cmd_shelf(args):
+    query = {
+        "shelf": args.shelf,
+        "per_page": str(max(1, min(100, args.per_page))),
+        "page": str(max(1, args.page)),
+        "sort": args.sort,
+        "order": args.order,
+    }
+    if args.key:
+        query["key"] = args.key
+    url = "%s/review/list_rss/%s?%s" % (
+        BASE, urllib.parse.quote(str(args.user)), urllib.parse.urlencode(query))
+    feed = fetch(url)
+
+    books = []
+    for item in re.findall(r"<item>(.*?)</item>", feed, re.S):
+        num_pages = re.search(r"<num_pages>\s*(\d*)\s*</num_pages>", item)
+        books.append({
+            "bookId": tag(item, "book_id"),
+            "title": tag(item, "title"),
+            "author": tag(item, "author_name"),
+            "cover": bigger_cover(tag(item, "book_medium_image_url")
+                                  or tag(item, "book_image_url")),
+            "url": "%s/book/show/%s" % (BASE, tag(item, "book_id")),
+            "userRating": to_int(tag(item, "user_rating")),
+            "averageRating": to_float(tag(item, "average_rating")),
+            "numPages": to_int(num_pages.group(1)) if num_pages else 0,
+            "published": tag(item, "book_published"),
+            "shelves": tag(item, "user_shelves"),
+            "readAt": tag(item, "user_read_at"),
+            "addedAt": tag(item, "user_date_added"),
+            "review": text_of(raw_tag(item, "user_review")),
+            "description": text_of(raw_tag(item, "book_description")),
+        })
+
+    title = re.search(r"<title>\s*(.*?)\s*</title>", feed, re.S)
+    return {
+        "user": str(args.user),
+        "shelf": args.shelf,
+        "page": max(1, args.page),
+        "perPage": max(1, min(100, args.per_page)),
+        "title": text_of(title.group(1)) if title else "",
+        "url": "%s/review/list/%s?shelf=%s" % (
+            BASE, urllib.parse.quote(str(args.user)), urllib.parse.quote(args.shelf)),
+        "books": books,
+    }
+
+
+# -------------------------------------------------------------------- search
+
+def cmd_search(args):
+    """Search via Goodreads' own autocomplete endpoint.
+
+    /search is behind the same bot check that guards /book/show, and it only
+    returns HTML. /book/auto_complete answers JSON with everything a result row
+    needs — cover, rating, page count, a blurb — and has stayed reachable, so
+    it is the primary search path rather than a fallback.
+    """
+    url = "%s/book/auto_complete?%s" % (BASE, urllib.parse.urlencode({
+        "format": "json", "q": args.query}))
+    body = fetch(url)
+    try:
+        rows = json.loads(body)
+    except ValueError:
+        raise FetchError("Goodreads returned no usable search results")
+    if not isinstance(rows, list):
+        rows = []
+
+    results = []
+    for row in rows[:max(1, args.limit)]:
+        author = row.get("author") or {}
+        book_url = row.get("bookUrl") or ""
+        results.append({
+            "bookId": str(row.get("bookId") or ""),
+            "title": row.get("title") or row.get("bookTitleBare") or "",
+            "author": author.get("name") or "",
+            "cover": bigger_cover(row.get("imageUrl") or ""),
+            "url": BASE + book_url if book_url.startswith("/") else book_url,
+            "averageRating": to_float(row.get("avgRating")),
+            "ratingsCount": to_int(row.get("ratingsCount")),
+            "numPages": to_int(row.get("numPages")),
+            "description": text_of((row.get("description") or {}).get("html") or ""),
+        })
+
+    return {"query": args.query, "url": url, "results": results}
+
+
+# ---------------------------------------------------------------------- book
+
+def apollo_state(page):
+    m = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', page, re.S)
+    if not m:
+        raise ValueError("book page carried no __NEXT_DATA__ payload")
+    data = json.loads(m.group(1))
+    return data.get("props", {}).get("pageProps", {}).get("apolloState", {}) or {}
+
+
+def deref(state, node):
+    """Follow an Apollo {"__ref": key} pointer; pass anything else through."""
+    if isinstance(node, dict) and "__ref" in node:
+        return state.get(node["__ref"], {}) or {}
+    return node or {}
+
+
+def widget_reviews(book_id, limit):
+    """Reviews from the embeddable reviews widget.
+
+    The widget is a plain server-rendered page that predates the React rewrite
+    and is not behind the bot check, so it keeps the reviews view alive when
+    /book/show refuses us. It carries fewer reviews and truncates their text,
+    which is why it is the fallback and not the default.
+    """
+    url = "%s/api/reviews_widget_iframe?%s" % (BASE, urllib.parse.urlencode({
+        "did": "1", "format": "html", "isbn": str(book_id),
+        "links": "660", "review_back": "fff", "stars": "000", "text": "000"}))
+    page = fetch(url)
+
+    out = []
+    for block in re.findall(r'<div class="gr_review_container".*?</div>\s*</div>', page, re.S):
+        who = re.search(r"gr_review_by'>.*?<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", block, re.S)
+        rating = re.search(r"gr_rating'[^>]*>(.*?)</span>", block, re.S)
+        when = re.search(r"gr_review_date'[^>]*>(.*?)</span>", block, re.S)
+        body = re.search(r'gr_review_text">(.*?)</div>', block, re.S)
+        text = text_of(re.sub(r'<a [^>]*gr_more_link.*?</a>', "…", body.group(1), flags=re.S)) if body else ""
+        out.append({
+            "reviewer": text_of(who.group(2)) if who else "A Goodreads member",
+            "reviewerUrl": html.unescape(who.group(1)) if who else "",
+            "avatar": "",
+            "rating": text_of(rating.group(1)).count("\u2605") if rating else 0,
+            "likes": 0,
+            "comments": 0,
+            "spoiler": False,
+            "createdAt": 0,
+            "when": text_of(when.group(1)) if when else "",
+            "text": text,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def cmd_book(args):
+    book_id = str(args.id).strip()
+    url = "%s/book/show/%s" % (BASE, urllib.parse.quote(book_id))
+    try:
+        page = fetch(url)
+        state = apollo_state(page)
+    except (FetchError, ValueError) as exc:
+        # The rich page is gated more often than the widget is. Rather than
+        # showing nothing, hand back the reviews the widget will still give us
+        # and let the caller keep the title/cover it already had.
+        return {
+            "partial": True,
+            "note": str(exc),
+            "book": {"bookId": book_id, "url": url},
+            "reviews": widget_reviews(book_id, args.reviews),
+        }
+    root = state.get("ROOT_QUERY", {}) or {}
+
+    book = {}
+    for key, value in root.items():
+        if key.startswith("getBookByLegacyId"):
+            book = deref(state, value)
+            break
+    if not book:
+        # Fall back to the richest Book node when the query key is shaped
+        # differently (a /book/show/<slug> redirect, an A/B'd page).
+        candidates = [v for k, v in state.items()
+                      if k.startswith("Book:") and v.get("title")]
+        book = max(candidates, key=len) if candidates else {}
+
+    work = deref(state, book.get("work"))
+    stats = work.get("stats") or {}
+    details = book.get("details") or {}
+    author = deref(state, (book.get("primaryContributorEdge") or {}).get("node"))
+
+    series = ""
+    for entry in book.get("bookSeries") or []:
+        node = deref(state, entry.get("series"))
+        if node.get("title"):
+            series = node["title"]
+            position = entry.get("userPosition")
+            if position:
+                series += " #%s" % position
+            break
+
+    reviews = []
+    review_root = None
+    for key, value in root.items():
+        if key.startswith("getReviews"):
+            review_root = value
+            break
+    edges = (review_root or {}).get("edges") or []
+    if not edges:
+        edges = [{"node": {"__ref": k}} for k in state if k.startswith("Review:")]
+    for edge in edges:
+        node = deref(state, edge.get("node"))
+        if not node:
+            continue
+        creator = deref(state, node.get("creator"))
+        reviews.append({
+            "reviewer": creator.get("name") or "A Goodreads member",
+            "reviewerUrl": creator.get("webUrl") or "",
+            "avatar": creator.get("imageUrlSquare") or "",
+            "rating": to_int(node.get("rating")),
+            "likes": to_int(node.get("likeCount")),
+            "comments": to_int(node.get("commentCount")),
+            "spoiler": bool(node.get("spoilerStatus")),
+            "createdAt": to_int(node.get("createdAt")) // 1000,
+            "when": date_of(node.get("createdAt")),
+            "text": text_of(node.get("text") or ""),
+        })
+        if len(reviews) >= args.reviews:
+            break
+
+    return {
+        "partial": False,
+        "book": {
+            "bookId": str(book.get("legacyId") or book_id),
+            "title": book.get("titleComplete") or book.get("title") or "",
+            "author": author.get("name") or "",
+            "authorUrl": author.get("webUrl") or "",
+            "series": series,
+            "cover": book.get("imageUrl") or "",
+            "url": book.get("webUrl") or url,
+            "description": text_of(book.get("description") or ""),
+            "genres": [((g.get("genre") or {}).get("name") or "")
+                       for g in (book.get("bookGenres") or [])][:6],
+            "format": details.get("format") or "",
+            "numPages": to_int(details.get("numPages")),
+            "publisher": details.get("publisher") or "",
+            "isbn13": details.get("isbn13") or "",
+            "language": ((details.get("language") or {}).get("name") or ""),
+            "publicationYear": year_of(details.get("publicationTime")),
+            "averageRating": to_float(stats.get("averageRating")),
+            "ratingsCount": to_int(stats.get("ratingsCount")),
+            "reviewsCount": to_int(stats.get("textReviewsCount")),
+            "ratingsDist": [to_int(n) for n in (stats.get("ratingsCountDist") or [])],
+        },
+        "reviews": reviews,
+    }
+
+
+def date_of(millis):
+    if not millis:
+        return ""
+    try:
+        return time.strftime("%b %d, %Y", time.gmtime(int(millis) / 1000))
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def year_of(millis):
+    if not millis:
+        return ""
+    try:
+        return time.strftime("%Y", time.gmtime(int(millis) / 1000))
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+# ---------------------------------------------------------------------- main
+
+COMMANDS = {
+    "shelves": (cmd_shelves, 300),
+    "whoami": (cmd_whoami, 0),
+    "shelf": (cmd_shelf, 300),
+    "search": (cmd_search, 3600),
+    "book": (cmd_book, 86400),
+}
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="goodreads-cli", description=__doc__)
+    parser.add_argument("--ttl", type=int, default=-1,
+                        help="cache lifetime in seconds (default: per command)")
+    parser.add_argument("--no-cache", action="store_true", help="always refetch")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("shelves", help="list a user's shelves and their counts")
+    p.add_argument("--user", required=True)
+
+    p = sub.add_parser("whoami", help="turn a copied Goodreads URL into a user id")
+    p.add_argument("--url", required=True)
+
+    p = sub.add_parser("shelf", help="list the books on one shelf")
+    p.add_argument("--user", required=True)
+    p.add_argument("--shelf", default="read")
+    p.add_argument("--page", type=int, default=1)
+    p.add_argument("--per-page", type=int, default=30)
+    p.add_argument("--sort", default="date_added",
+                   choices=["date_added", "date_read", "date_updated", "title",
+                            "author", "rating", "avg_rating", "date_pub"])
+    p.add_argument("--order", default="d", choices=["a", "d"])
+    p.add_argument("--key", default="", help="RSS key, for a private profile")
+
+    p = sub.add_parser("search", help="search Goodreads for books")
+    p.add_argument("--query", required=True)
+    p.add_argument("--page", type=int, default=1)
+    p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("book", help="book details plus community reviews")
+    p.add_argument("--id", required=True)
+    p.add_argument("--reviews", type=int, default=15)
+
+    return parser
+
+
+def main(argv):
+    args = build_parser().parse_args(argv)
+    handler, default_ttl = COMMANDS[args.command]
+    ttl = 0 if args.no_cache else (args.ttl if args.ttl >= 0 else default_ttl)
+
+    key = json.dumps([args.command, {k: v for k, v in sorted(vars(args).items())
+                                     if k not in ("ttl", "no_cache")}],
+                     sort_keys=True)
+    cached = cache_get(key, ttl)
+    if cached is not None:
+        cached["cached"] = True
+        json.dump(cached, sys.stdout)
+        return 0
+
+    try:
+        result = handler(args)
+    except FetchError as exc:
+        return bail(str(exc))
+    except (ValueError, KeyError) as exc:
+        return bail("could not read the Goodreads response (%s)" % exc)
+
+    if ttl > 0:
+        cache_put(key, result)
+    result["cached"] = False
+    json.dump(result, sys.stdout)
+    return 0
+
+
+def bail(message):
+    json.dump({"error": message}, sys.stdout)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
