@@ -82,6 +82,31 @@ Panel {
   property string pendingQuery: ""
   property string lastSearched: ""
 
+  // What is in the box right now. Filtering the list you are looking at is
+  // local and free, so it runs on every keystroke from the first letter; the
+  // Goodreads request behind it is what waits for the debounce and the
+  // three-letter minimum.
+  property string filterText: ""
+  readonly property bool filtering: filterText !== ""
+
+  // The shelf view shows one page at a time, but a filter that only searched
+  // the visible page would answer "you don't own that" about books sitting on
+  // page 2. So the first keystroke pulls the whole shelf once, 100 at a time,
+  // and the filter runs against that. The CLI caches it, so leaving and
+  // returning to a shelf costs nothing.
+  property var shelfAll: []
+  property string shelfAllShelf: ""
+  property bool shelfAllLoading: false
+  property int shelfAllPage: 1
+  readonly property int shelfAllPageSize: 100
+  readonly property int shelfAllMaxPages: 12
+
+  // Filter against the whole shelf once it is here, and against the page that
+  // is already on screen until then, so typing is never blocked on a fetch.
+  readonly property var shelfSource: shelfAll.length > 0 ? shelfAll : books
+  readonly property var filteredBooks: Model.filterBooks(shelfSource, filterText)
+  readonly property var filteredShelves: Model.filterShelves(shelves, filterText)
+
   // The row the book view was opened from, so a details fetch that only
   // returned reviews still has a title and cover to show.
   property var pendingBook: null
@@ -160,14 +185,53 @@ Panel {
     root.shelfName = name
     root.shelfPage = 1
     root.books = []
+    if (root.shelfAllShelf !== name) root.forgetWholeShelf()
     loadShelf(fresh === true)
   }
 
-  function loadShelf(fresh) {
-    var args = ["shelf", "--user", root.userId, "--shelf", root.shelfName,
-                "--per-page", String(root.perPage), "--page", String(root.shelfPage),
-                "--sort", root.shelfName === "read" ? "date_read" : "date_added"]
+  // Books you have finished are most interesting by when you read them;
+  // everything else by when you added it.
+  function shelfSort() {
+    return root.shelfName === "read" ? "date_read" : "date_added"
+  }
+
+  function shelfArgs(shelf, page, perPage) {
+    var args = ["shelf", "--user", root.userId, "--shelf", shelf,
+                "--per-page", String(perPage), "--page", String(page),
+                "--sort", root.shelfSort()]
     if (root.rssKey !== "") args = args.concat(["--key", root.rssKey])
+    return args
+  }
+
+  // Pull the whole of the shelf on screen, one 100-book page at a time, so the
+  // filter can speak for the entire shelf rather than the page. Idempotent:
+  // asking again for a shelf already loaded (or loading) does nothing.
+  function ensureWholeShelf() {
+    if (root.view !== "shelf" || root.shelfName === "" || !root.configured) return
+    if (root.shelfAllShelf === root.shelfName) return
+    root.shelfAllShelf = root.shelfName
+    root.shelfAll = []
+    root.shelfAllPage = 1
+    root.shelfAllLoading = true
+    root.fetchShelfAllPage()
+  }
+
+  function fetchShelfAllPage() {
+    shelfAllProc.running = false
+    shelfAllProc.command = root.cli(
+      root.shelfArgs(root.shelfAllShelf, root.shelfAllPage, root.shelfAllPageSize), false)
+    shelfAllProc.running = true
+  }
+
+  function forgetWholeShelf() {
+    shelfAllProc.running = false
+    root.shelfAll = []
+    root.shelfAllShelf = ""
+    root.shelfAllLoading = false
+  }
+
+  function loadShelf(fresh) {
+    var args = root.shelfArgs(root.shelfName, root.shelfPage, root.perPage)
     shelfProc.running = false
     shelfProc.command = root.cli(args, fresh === true)
     shelfProc.running = true
@@ -190,11 +254,13 @@ Panel {
     searchDebounce.stop()
     root.query = q
     root.lastSearched = q
-    // Back should return to whatever the search interrupted, not always the
-    // shelf list — typing while reading a shelf and then going back should put
-    // that shelf on screen again.
-    if (root.view !== "search") root.backView = root.view
-    root.view = "search"
+    // A view that already lists things keeps its own list and gains a second,
+    // clearly labelled section of Goodreads hits underneath. Only the book
+    // view, which has no list to narrow, hands over to the results view.
+    if (root.view === "book") {
+      root.backView = root.view
+      root.view = "search"
+    }
     root.results = []
     searchProc.running = false
     searchProc.command = root.cli(["search", "--query", q, "--limit", "20"], fresh === true)
@@ -207,13 +273,18 @@ Panel {
   function scheduleSearch(text) {
     var q = String(text || "").trim()
     root.pendingQuery = q
+    root.filterText = q
     searchDebounce.stop()
     if (q === "") {
-      // Emptying the field is an unambiguous "take me back".
+      // Emptying the field drops the filter. On the dedicated results view
+      // there is nothing left to look at, so it also takes you back.
       root.lastSearched = ""
+      root.results = []
       if (root.view === "search") root.goBack()
       return
     }
+    // Filtering a shelf has to speak for the whole shelf, not the page.
+    if (root.view === "shelf") root.ensureWholeShelf()
     if (q.length < root.searchMinChars) return
     if (q === root.lastSearched) return
     searchDebounce.restart()
@@ -252,7 +323,7 @@ Panel {
   function refresh() {
     root.errorText = ""
     switch (root.view) {
-    case "shelf": loadShelf(true); break
+    case "shelf": root.forgetWholeShelf(); loadShelf(true); if (root.filtering) root.ensureWholeShelf(); break
     case "search": runSearch(root.query, true); break
     case "book": if (root.pendingBook) openBook(root.pendingBook, true); break
     default: loadShelves(true)
@@ -452,6 +523,30 @@ Panel {
     }
   }
 
+  Process {
+    id: shelfAllProc
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: function(code) {
+      var parsed = Model.parseResponse(shelfAllProc.stdout.text)
+      if (code !== 0 || !parsed.ok) {
+        // The page filter still works; it just cannot promise it saw the whole
+        // shelf, which the section header says for itself.
+        root.shelfAllLoading = false
+        return
+      }
+      var page = Model.booksOf(parsed.data)
+      root.shelfAll = root.shelfAll.concat(page)
+      // A short page is the last page. The cap is a backstop against a shelf
+      // (or a bug) that would otherwise page forever.
+      if (page.length >= root.shelfAllPageSize && root.shelfAllPage < root.shelfAllMaxPages) {
+        root.shelfAllPage += 1
+        root.fetchShelfAllPage()
+      } else {
+        root.shelfAllLoading = false
+      }
+    }
+  }
+
   Timer {
     id: searchDebounce
     interval: root.searchDebounceMs
@@ -502,12 +597,95 @@ Panel {
     function refresh(): string { root.refresh(); return "ok" }
     function connect(): string { root.open(); root.startConnect(); return "ok" }
     function shelf(name: string): string { root.open(); root.openShelf(name, false); return name }
-    function search(text: string): string { root.open(); root.runSearch(text); return text }
+    // Fills the box rather than firing a bare query, so a scripted search
+    // behaves exactly like a typed one — the shelf on screen narrows too, and
+    // the text is there to refine.
+    function search(text: string): string {
+      root.open()
+      searchField.text = String(text)
+      return text
+    }
     function book(id: string): string {
       root.open()
       // No row to carry over here, so the view fills in entirely from the fetch.
       root.openBook({ bookId: String(id), title: "", author: "", cover: "", url: "" }, false)
       return id
+    }
+  }
+
+  // One book row, shared by the shelf list and the Goodreads list so the two
+  // sections of a filtered view are visibly the same kind of thing.
+  component BookRow: Item {
+    id: bookRow
+
+    required property var modelData
+
+    width: parent ? parent.width : 0
+    height: Math.max(root.showCovers ? Style.space(56) : 0,
+                     rowText.implicitHeight + Style.spacing.sm * 2)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Style.space(6)
+      color: bookHover.hovered ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.07) : "transparent"
+      TapHandler { onTapped: root.openBook(bookRow.modelData, false) }
+    }
+    HoverHandler { id: bookHover; cursorShape: Qt.PointingHandCursor }
+
+    // Covers come off Goodreads' CDN; a failed or slow load leaves the slot
+    // empty rather than stalling or shifting the row.
+    Image {
+      id: cover
+      visible: root.showCovers && bookRow.modelData.cover !== ""
+      anchors.left: parent.left
+      anchors.leftMargin: Style.spacing.sm
+      anchors.verticalCenter: parent.verticalCenter
+      height: Style.space(48)
+      width: Style.space(32)
+      fillMode: Image.PreserveAspectFit
+      asynchronous: true
+      cache: true
+      source: root.showCovers ? bookRow.modelData.cover : ""
+    }
+
+    Column {
+      id: rowText
+      anchors.left: cover.visible ? cover.right : parent.left
+      anchors.leftMargin: Style.spacing.md
+      anchors.right: parent.right
+      anchors.rightMargin: Style.spacing.sm
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.spacing.xxs
+
+      Text {
+        width: parent.width
+        text: bookRow.modelData.title
+        color: root.fg
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        elide: Text.ElideRight
+      }
+      Text {
+        width: parent.width
+        visible: bookRow.modelData.author !== ""
+        text: bookRow.modelData.author
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+      Text {
+        width: parent.width
+        // Your own rating leads when you have one — that is the interesting
+        // number on your own shelf — with the crowd's average following it.
+        text: (bookRow.modelData.userRating > 0
+               ? Model.stars(bookRow.modelData.userRating) + "   "
+               : "") + Model.ratingLine(bookRow.modelData)
+        color: bookRow.modelData.userRating > 0 ? root.accent : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
     }
   }
 
@@ -784,7 +962,7 @@ Panel {
             spacing: 0
 
             Repeater {
-              model: root.shelves
+              model: root.filteredShelves
               delegate: Item {
                 id: shelfRow
                 required property var modelData
@@ -836,10 +1014,12 @@ Panel {
             }
 
             Text {
-              visible: root.shelves.length === 0 && !root.busy && root.errorText === ""
+              visible: root.filteredShelves.length === 0 && !root.busy && root.errorText === ""
               width: parent.width
               topPadding: Style.space(12)
-              text: "No shelves found for user " + root.userId + "."
+              text: root.filtering
+                    ? "No shelf matches “" + root.filterText + "”."
+                    : "No shelves found for user " + root.userId + "."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -847,93 +1027,47 @@ Panel {
             }
           }
 
-          // ============================== shelf + search book lists =========
+          // ================================ shelf list, filtered or paged ===
           Column {
-            visible: (root.view === "shelf" || root.view === "search") && root.configured
+            visible: root.view === "shelf" && root.configured
             width: parent.width
             spacing: Style.spacing.xs
 
+            // While filtering, say which shelf is being narrowed and how far
+            // the search actually reaches — a filter that quietly covered only
+            // the visible page would be worse than no filter at all.
+            PanelSectionHeader {
+              visible: root.filtering
+              text: Model.prettyShelf(root.shelfName).toUpperCase() + "  ·  "
+                    + (root.shelfAllLoading
+                       ? "checking the whole shelf…"
+                       : root.filteredBooks.length + (root.filteredBooks.length === 1 ? " match" : " matches"))
+              foreground: root.fg
+              fontFamily: root.fontFamily
+            }
+
             Repeater {
-              model: root.view === "shelf" ? root.books : root.results
-              delegate: Item {
-                id: bookRow
-                required property var modelData
-                width: column.width
-                height: Math.max(root.showCovers ? Style.space(56) : 0,
-                                 rowText.implicitHeight + Style.spacing.sm * 2)
+              model: root.filtering ? root.filteredBooks : root.books
+              delegate: BookRow {}
+            }
 
-                Rectangle {
-                  anchors.fill: parent
-                  radius: Style.space(6)
-                  color: bookHover.hovered ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.07)
-                                           : "transparent"
-                  TapHandler { onTapped: root.openBook(bookRow.modelData, false) }
-                }
-                HoverHandler { id: bookHover; cursorShape: Qt.PointingHandCursor }
-
-                // Covers come off Goodreads' CDN; a failed or slow load leaves
-                // the slot empty rather than stalling or shifting the row.
-                Image {
-                  id: cover
-                  visible: root.showCovers && bookRow.modelData.cover !== ""
-                  anchors.left: parent.left
-                  anchors.leftMargin: Style.spacing.sm
-                  anchors.verticalCenter: parent.verticalCenter
-                  height: Style.space(48)
-                  width: Style.space(32)
-                  fillMode: Image.PreserveAspectFit
-                  asynchronous: true
-                  cache: true
-                  source: root.showCovers ? bookRow.modelData.cover : ""
-                }
-
-                Column {
-                  id: rowText
-                  anchors.left: cover.visible ? cover.right : parent.left
-                  anchors.leftMargin: Style.spacing.md
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.spacing.sm
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.spacing.xxs
-
-                  Text {
-                    width: parent.width
-                    text: bookRow.modelData.title
-                    color: root.fg
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    elide: Text.ElideRight
-                  }
-                  Text {
-                    width: parent.width
-                    visible: bookRow.modelData.author !== ""
-                    text: bookRow.modelData.author
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    elide: Text.ElideRight
-                  }
-                  Text {
-                    width: parent.width
-                    // Your own rating leads when you have one — that is the
-                    // interesting number on your own shelf — with the crowd's
-                    // average following it.
-                    text: (bookRow.modelData.userRating > 0
-                           ? Model.stars(bookRow.modelData.userRating) + "   "
-                           : "") + Model.ratingLine(bookRow.modelData)
-                    color: bookRow.modelData.userRating > 0 ? root.accent : root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    elide: Text.ElideRight
-                  }
-                }
-              }
+            Text {
+              visible: root.filtering && !root.shelfAllLoading && root.filteredBooks.length === 0
+              width: parent.width
+              topPadding: Style.space(6)
+              text: "Nothing on this shelf matches “" + root.filterText + "”."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
             }
 
             // Shelf paging. The RSS feed hands out one page at a time, so
             // "next" is only offered while the current page came back full.
+            // A filter spans the whole shelf, so pages stop meaning anything.
             Item {
-              visible: root.view === "shelf" && (root.shelfPage > 1 || root.books.length >= root.perPage)
+              visible: !root.filtering
+                       && (root.shelfPage > 1 || root.books.length >= root.perPage)
               width: parent.width
               height: Style.spacing.controlHeight
 
@@ -971,13 +1105,56 @@ Panel {
             }
 
             Text {
-              visible: !root.busy && root.errorText === ""
-                       && (root.view === "shelf" ? root.books.length === 0 : root.results.length === 0)
+              visible: !root.busy && !root.filtering && root.errorText === ""
+                       && root.books.length === 0
               width: parent.width
               topPadding: Style.space(12)
-              text: root.view === "shelf"
-                    ? "Nothing on this shelf" + (root.shelfPage > 1 ? " page." : ".")
-                    : (root.query === "" ? "Type at least " + root.searchMinChars + " letters above." : "No results for “" + root.query + "”.")
+              text: "Nothing on this shelf" + (root.shelfPage > 1 ? " page." : ".")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              horizontalAlignment: Text.AlignHCenter
+            }
+          }
+
+          // ==================================== all of Goodreads (search) ===
+          // On a list view this is the second section, under its own heading,
+          // so it is never mistaken for part of your shelf. On the results
+          // view it is the only thing there and needs no heading.
+          Column {
+            visible: root.configured
+                     && (root.view === "search"
+                         || (root.filtering && root.results.length > 0
+                             && (root.view === "shelf" || root.view === "shelves")))
+            width: parent.width
+            spacing: Style.spacing.xs
+
+            PanelSeparator {
+              width: parent.width
+              visible: root.view !== "search"
+              foreground: root.fg
+            }
+
+            PanelSectionHeader {
+              visible: root.view !== "search"
+              text: "ALL OF GOODREADS"
+              foreground: root.fg
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.results
+              delegate: BookRow {}
+            }
+
+            Text {
+              visible: root.view === "search" && !root.busy && root.errorText === ""
+                       && root.results.length === 0
+              width: parent.width
+              topPadding: Style.space(12)
+              text: root.query === ""
+                    ? "Type at least " + root.searchMinChars + " letters above."
+                    : "No results for “" + root.query + "”."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall

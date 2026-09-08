@@ -152,6 +152,60 @@ function userIdIn(text) {
   return ""
 }
 
+// ------------------------------------------------------------------- filter
+
+// Fold a string down to something worth comparing: lowercase, accents removed
+// where the engine can do it, punctuation and runs of space flattened. Without
+// this, searching "dune" misses "Dune:" and searching "les mis" misses
+// "Les Misérables".
+function matchNorm(text) {
+  var s = String(text || "").toLowerCase()
+  try {
+    // Decompose, then drop the combining marks é -> e.
+    s = s.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  } catch (e) {
+    // An engine without String.normalize just compares the accented form.
+  }
+  return s.replace(/[^a-z0-9]+/g, " ").replace(/^\s+|\s+$/g, "")
+}
+
+// Every whitespace-separated term must appear somewhere in the haystack, so
+// "herbert dune" finds Dune the same way "dune herbert" does.
+function matchesTerms(haystack, query) {
+  var hay = matchNorm(haystack)
+  var terms = matchNorm(query).split(" ")
+  for (var i = 0; i < terms.length; i++) {
+    if (terms[i] === "") continue
+    if (hay.indexOf(terms[i]) === -1) return false
+  }
+  return true
+}
+
+// Books on a shelf, narrowed by title and author. An empty query returns the
+// list untouched so callers can bind to this unconditionally.
+function filterBooks(books, query) {
+  var list = Array.isArray(books) ? books : []
+  if (matchNorm(query) === "") return list
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var b = list[i] || {}
+    if (matchesTerms(String(b.title || "") + " " + String(b.author || ""), query)) out.push(b)
+  }
+  return out
+}
+
+// The same, for the shelf list itself.
+function filterShelves(shelves, query) {
+  var list = Array.isArray(shelves) ? shelves : []
+  if (matchNorm(query) === "") return list
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var s = list[i] || {}
+    if (matchesTerms(String(s.label || "") + " " + String(s.name || ""), query)) out.push(s)
+  }
+  return out
+}
+
 // ------------------------------------------------------------------ display
 
 // "currently-reading" -> "Currently reading". Custom shelves keep whatever

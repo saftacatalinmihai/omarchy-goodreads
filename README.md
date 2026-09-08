@@ -11,8 +11,9 @@ shelves, book search, and community reviews one click away.
   `to-read`, and any custom ones — with its book count.
 - **A shelf's books.** Cover, title, author, your own star rating, the
   community average, page count and year. Paged, newest first.
-- **Book search.** Type in the panel's search box — results arrive as you type,
-  from three letters on. Enter skips the wait.
+- **Search that knows where you are.** Typing narrows the list in front of you
+  *and* searches Goodreads, in two labelled sections — so looking for a book on
+  your shelf and looking for one you don't own are the same gesture.
 - **Book details and reviews.** Blurb, genres, edition details, rating
   breakdown, and the top community reviews with their stars, dates, and likes.
 - **The bar pill** shows how many books are on the shelf you pick (default:
@@ -48,6 +49,32 @@ URL, and only your browser knows it. Connect gets it across in one step:
 The watcher only ever reacts to Goodreads user URLs, ignores everything else,
 and runs for five minutes before giving up. It reads no browser data — no
 cookies, no history, no extension.
+
+## How search works
+
+The box at the top of the panel is always there, and what it does depends on
+what is under it:
+
+- **On a shelf** it filters that shelf under a `READ · 3 matches` heading, then
+  lists Goodreads hits below under `ALL OF GOODREADS`.
+- **On the shelf list** it filters your shelf names the same way, Goodreads hits
+  underneath.
+- **On a book** there is no list to narrow, so it goes straight to results.
+
+Filtering is local and free, so it runs from the first letter with no delay.
+The Goodreads request behind it waits 350ms and needs three letters, so a burst
+of typing costs one request. Enter skips that wait. Clearing the box drops the
+filter and puts back the paged shelf.
+
+Matching ignores case, accents, and punctuation, and takes terms in any order —
+`les mis` finds *Les Misérables*, `herbert dune` finds *Dune*.
+
+**The filter covers the whole shelf, not the page on screen.** A shelf is shown
+30 books at a time, but a filter that only searched those would answer "you
+don't own that" about a book sitting on page 2. So the first keystroke pulls the
+whole shelf once, 100 books per request — one request for most shelves — and
+filters against that. Until it lands, the heading says `checking the whole
+shelf…` and the visible page is filtered in the meantime.
 
 ## Requirements
 
@@ -139,7 +166,7 @@ The panel registers as `goodreads`:
 omarchy-shell goodreads connect
 omarchy-shell goodreads toggle
 omarchy-shell goodreads shelf to-read
-omarchy-shell goodreads search "ursula le guin"
+omarchy-shell goodreads search "ursula le guin"   # types into the box: filters and searches
 omarchy-shell goodreads book 44767458
 omarchy-shell goodreads refresh
 ```
